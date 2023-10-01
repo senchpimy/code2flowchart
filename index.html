@@ -4,12 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Code2Flowchart</title>
-    <script src="src/utils.ts"></script>
+    <script type="module" src="/src/utils.ts"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
     <div id="root"></div>
-    <input id="message" type="text" name="message" value="Initial Value"></input>
-    <button type="button" id="send-code" onclick="getText()">Click</button>
-    <script type="module" src="/src/main.tsx"></script>
+    <textarea id="message" name="message"></textarea>
+    <button type="button" id="send-code">Click</button>
   </body>
 </html>
