@@ -127,7 +127,9 @@ int main() {
       isLoading = false;
     }
   });
+
   var ast_Output = "";
+
   async function parseCode() {
     if (isLoading || !parser) return;
 
@@ -486,40 +488,66 @@ int main() {
 
     const globalMaxX = Math.max(...nodes.map((n) => n.x! + node_width));
 
-    svgElement
+    function getLinkPath(d: any) {
+      const sx = d.source.x + node_width / 2;
+      const sy = d.source.y + node_height;
+      const tx = d.target.x + node_width / 2;
+      const ty = d.target.y;
+
+      const isBackEdge = ty < sy;
+
+      if (isBackEdge) {
+        // Calculate a local max X considering only nodes within the vertical span of the loop
+        // We look for nodes that are vertically between 'ty' (target top) and 'sy' (source bottom)
+        // We add some padding to avoid collision
+        const nodesInSpan = nodes.filter(n => {
+           const ny = n.y ?? 0;
+           return ny >= d.target.y && ny <= d.source.y;
+        });
+
+        const localMaxX = nodesInSpan.length > 0 
+           ? Math.max(...nodesInSpan.map(n => (n.x ?? 0) + node_width)) 
+           : globalMaxX;
+
+        const loopX = localMaxX + 40;
+        const turnY = sy + 20;
+
+        return `M ${sx} ${sy} 
+                L ${sx} ${turnY}
+                L ${loopX} ${turnY} 
+                L ${loopX} ${d.target.y + node_height / 2} 
+                L ${d.target.x + node_width} ${d.target.y + node_height / 2}`;
+      } else {
+        return `M ${sx} ${sy} C ${sx} ${sy + 40}, ${tx} ${ty - 40}, ${tx} ${ty}`;
+      }
+    }
+
+    const linkPaths = svgElement
       .append("g")
       .selectAll("path")
       .data(links)
       .join("path")
-      .attr("d", (d: any) => {
-        const sx = d.source.x + node_width / 2;
-        const sy = d.source.y + node_height;
-        const tx = d.target.x + node_width / 2;
-        const ty = d.target.y;
-
-        const isBackEdge = ty < sy;
-
-        if (isBackEdge) {
-          // --- CORRECCIÓN VISUAL DE LOOP ---
-          // En lugar de salir por la derecha (donde choca con End),
-          // salimos por ABAJO, bajamos un poco más para esquivar la fila actual,
-          // y luego rodeamos.
-          const loopX = globalMaxX + 40;
-          const turnY = sy + 20; // Bajamos 20px extra por debajo del nodo origen
-
-          return `M ${sx} ${sy} 
-                  L ${sx} ${turnY}
-                  L ${loopX} ${turnY} 
-                  L ${loopX} ${d.target.y + node_height / 2} 
-                  L ${d.target.x + node_width} ${d.target.y + node_height / 2}`;
-        } else {
-          return `M ${sx} ${sy} C ${sx} ${sy + 40}, ${tx} ${ty - 40}, ${tx} ${ty}`;
-        }
-      })
+      .attr("d", getLinkPath)
       .attr("fill", "none")
       .attr("stroke", "#555")
       .attr("stroke-width", 2)
       .attr("marker-end", "url(#arrowhead)");
+
+    // Drag Behavior
+    const drag = d3
+      .drag()
+      .on("start", function (event, d: any) {
+        d3.select(this).raise().style("cursor", "grabbing");
+      })
+      .on("drag", function (event, d: any) {
+        d.x = event.x;
+        d.y = event.y;
+        d3.select(this).attr("transform", `translate(${d.x},${d.y})`);
+        linkPaths.attr("d", getLinkPath);
+      })
+      .on("end", function (event, d: any) {
+        d3.select(this).style("cursor", "grab");
+      });
 
     // 6. Dibujar Nodos
     const nodeGroup = svgElement
@@ -527,7 +555,9 @@ int main() {
       .selectAll("g")
       .data(nodes)
       .join("g")
-      .attr("transform", (d) => `translate(${d.x}, ${d.y})`);
+      .attr("transform", (d) => `translate(${d.x}, ${d.y})`)
+      .style("cursor", "grab")
+      .call(drag as any);
 
     nodeGroup.each(function (d: FlowNode) {
       const g = d3.select(this);
@@ -588,7 +618,7 @@ int main() {
 </script>
 
 <main>
-  <h1>Editor Flowchart (Layout Fix)</h1>
+  <h1>Code2Flowchart</h1>
 
   {#if isLoading}
     <p>{loadingMessage}</p>
