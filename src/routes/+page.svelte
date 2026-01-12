@@ -5,14 +5,7 @@
   import * as d3 from "d3";
   import { toPng, toJpeg, toSvg } from 'html-to-image';
   import { jsPDF } from "jspdf";
-  import CodeMirror from "svelte-codemirror-editor";
-  import { javascript } from "@codemirror/lang-javascript";
-  import { python } from "@codemirror/lang-python";
-  import { cpp } from "@codemirror/lang-cpp";
-  import { java } from "@codemirror/lang-java";
-  import { rust } from "@codemirror/lang-rust";
-  import { go } from "@codemirror/lang-go";
-  import { oneDark } from "@codemirror/theme-one-dark";
+  import CodeEditor from "$lib/CodeEditor.svelte";
 
   interface FlowNode {
     id: string;
@@ -139,8 +132,6 @@ int main() {
     }
   });
 
-  var ast_Output = "";
-
   async function parseCode() {
     if (isLoading || !parser) return;
 
@@ -151,7 +142,6 @@ int main() {
       parser.setLanguage(currentLanguage);
       const tree = parser.parse(sourceCode);
       flowchartNodes = astToFlowNodes(tree.rootNode);
-      ast_Output = tree?.rootNode.toString();
     } catch (e) {
       console.error(e);
     }
@@ -185,9 +175,16 @@ int main() {
       }
     }
 
-    function cleanText(text: string): string {
+    function cleanText(text: string, isGrouped: boolean = false): string {
+      if (isGrouped) {
+        return text.split('\n').map(line => {
+          let clean = line.replace(/\s+/g, " ").trim();
+          if (clean.length > 30) return clean.substring(0, 27) + "...";
+          return clean;
+        }).join('\n');
+      }
       let clean = text.replace(/\s+/g, " ").trim();
-      if (clean.length > 20) return clean.substring(0, 18) + "...";
+      if (clean.length > 25) return clean.substring(0, 22) + "...";
       return clean;
     }
 
@@ -201,15 +198,15 @@ int main() {
         ].includes(n.type)
        ) return true;
 
-       if (n.type.includes("if_") || n.type.includes("elif_") || n.type === "if_expression") return true;
-       if (n.type.includes("while") || n.type.includes("for") || n.type === "loop_expression") return true;
+       if (n.type.includes("if_") || n.type.includes("elif_") || n.type === "if_expression" || n.type === "if_statement") return true;
+       if (n.type.includes("while") || n.type.includes("for") || n.type === "loop_expression" || n.type === "for_statement") return true;
 
        if (n.type === "expression_statement") {
           const child = n.namedChildren[0];
           if (child && (
              child.type.includes("if") || child.type.includes("loop") || 
              child.type.includes("while") || child.type.includes("for") || 
-             child.type === "block"
+             child.type === "block" || child.type === "compound_statement"
           )) return true;
        }
 
@@ -217,22 +214,25 @@ int main() {
     }
 
     function isNodeStatement(n: SyntaxNode): boolean {
-       // Re-using logic from step 5 (Statements)
        if (!n.isNamed) return false;
        return (
         n.type.endsWith("statement") ||
         n.type.endsWith("declaration") ||
         n.type.endsWith("expression") ||
         n.type === "call" ||
+        n.type === "call_expression" ||
         n.type === "macro_invocation" ||
         n.type === "assignment_expression" ||
         n.type === "augmented_assignment" ||
-        n.type === "inc_dec_expression"
+        n.type === "inc_dec_expression" ||
+        n.type === "return_statement" ||
+        n.type === "short_var_declaration" ||
+        n.type === "expression_statement"
        );
     }
 
     function walk(node: SyntaxNode, entryIds: string[]): string[] {
-      // 1. Blocks & Functions (Unified)
+      // 0. Top-level & Blocks
       if (
         [
           "program",
@@ -246,10 +246,6 @@ int main() {
           "else_clause",
           "class_declaration",
           "class_body",
-          "function_definition",
-          "function_declaration",
-          "method_declaration",
-          "function_item",
         ].includes(node.type)
       ) {
         let currentEntryIds = entryIds;
@@ -262,7 +258,7 @@ int main() {
                  const isStmt = isNodeStatement(child);
 
                  if (!isComplex && isStmt) {
-                     buffer.push(cleanText(child.text));
+                     buffer.push(cleanText(child.text, true));
                  } else {
                      if (buffer.length > 0) {
                          const processId = getNewId("process");
@@ -289,6 +285,22 @@ int main() {
         }
       }
 
+      // 1. Functions (Explicit handling to only walk body)
+      if (
+        [
+          "function_definition",
+          "function_declaration",
+          "method_declaration",
+          "function_item",
+        ].includes(node.type)
+      ) {
+        const body = node.childForFieldName("body");
+        if (body) return walk(body, entryIds);
+        const blockChild = node.namedChildren.find(c => c.type.includes("block") || c.type.includes("statement") || c.type === "compound_statement");
+        if (blockChild) return walk(blockChild, entryIds);
+        return entryIds;
+      }
+
       if (node.type === "expression_statement") {
         const child = node.namedChildren[0];
         if (child) {
@@ -309,16 +321,26 @@ int main() {
       if (
         ["if_statement", "elif_clause", "if_expression"].includes(node.type)
       ) {
+        let currentEntryIds = entryIds;
+        
+        // Go specific: Handle init field in if
+        const init = node.childForFieldName("init");
+        if (init) {
+          const initId = getNewId("process");
+          addNode(initId, cleanText(init.text), "process");
+          connectNodes(currentEntryIds, initId);
+          currentEntryIds = [initId];
+        }
+
         const condition = node.childForFieldName("condition");
-        // Fallback for consequence/alternative if fields are missing
         let consequence = node.childForFieldName("consequence");
-        if (!consequence) consequence = node.namedChildren.find(c => c.type.includes("block") || c.type.includes("statement"));
+        if (!consequence) consequence = node.namedChildren.find(c => c.type.includes("block") || c.type.includes("statement") || c.type === "compound_statement");
         
         let alternative = node.childForFieldName("alternative");
 
         const decisionId = getNewId("decision");
         addNode(decisionId, cleanText(condition?.text ?? "?"), "decision");
-        connectNodes(entryIds, decisionId);
+        connectNodes(currentEntryIds, decisionId);
 
         let exitPaths: string[] = [];
         if (consequence) exitPaths.push(...walk(consequence, [decisionId]));
@@ -337,7 +359,8 @@ int main() {
         node.type.includes("while") ||
         node.type.includes("for") ||
         node.type === "loop_expression" ||
-        node.type === "for_statement";
+        node.type === "for_statement" ||
+        node.type === "for_clause";
         
       if (isLoop) {
         let currentEntryIds = entryIds;
@@ -346,7 +369,7 @@ int main() {
           (c) => c.type === "for_clause" || c.type === "for_range_clause"
         );
 
-        let initializer = node.childForFieldName("initializer") || node.childForFieldName("init"); // Added 'init' for Go
+        let initializer = node.childForFieldName("initializer") || node.childForFieldName("init");
         if (forClause && !initializer)
           initializer = forClause.childForFieldName("initializer") || forClause.childForFieldName("init");
 
@@ -368,12 +391,10 @@ int main() {
         else if (right) condText = "in " + cleanText(right.text);
         else if (node.type === "loop_expression") condText = "true";
         else if (node.type === "for_statement" && !condition) {
-           // Go infinite loop or range loop where condition is implicit or different
-           // Check for range clause if not found in forClause logic above
            if (node.namedChildren.some(c => c.type === "for_range_clause")) {
                condText = "Range Loop"; 
            } else {
-               condText = "true"; // potential infinite loop `for { }`
+               condText = "true";
            }
         }
 
@@ -381,7 +402,6 @@ int main() {
         addNode(decisionId, condText, "decision");
         connectNodes(currentEntryIds, decisionId);
 
-        // Body discovery fallback
         let body =
           node.childForFieldName("body") ||
           node.childForFieldName("consequence");
@@ -392,7 +412,7 @@ int main() {
         if (body) bodyExitIds = walk(body, [decisionId]);
         else bodyExitIds = [decisionId];
 
-        let update = node.childForFieldName("update") || node.childForFieldName("post"); // Added 'post' for Go
+        let update = node.childForFieldName("update") || node.childForFieldName("post");
         if (forClause && !update)
           update = forClause.childForFieldName("update") || forClause.childForFieldName("post");
 
@@ -723,21 +743,6 @@ int main() {
     parseCode();
   }
 
-  function getLangExtension(langId: string) {
-    switch (langId) {
-      case "javascript": return javascript();
-      case "python": return python();
-      case "c": return cpp();
-      case "cpp": return cpp();
-      case "java": return java();
-      case "rust": return rust();
-      case "go": return go();
-      default: return null;
-    }
-  }
-
-  $: currentLangExtension = getLangExtension(selectedLanguageId);
-
   async function exportFlowchart(format: 'png' | 'jpg' | 'svg' | 'pdf') {
     if (!svg) return;
 
@@ -793,48 +798,56 @@ int main() {
   }
 </script>
 
-<main>
-  <h1>Code2Flowchart</h1>
+<main style="padding: 1rem; height: 100vh; display: flex; flex-direction: column; box-sizing: border-box; margin: 0; max-width: none;">
+  <h1 style="margin-top: 0; margin-bottom: 1rem;">Code2Flowchart</h1>
 
   {#if isLoading}
     <p>{loadingMessage}</p>
   {:else if errorMessage}
     <p style="color:red">{errorMessage}</p>
   {:else}
-    <div>
-      <label for="language-select">Lenguaje:</label>
-      <select
-        id="language-select"
-        bind:value={selectedLanguageId}
-        on:change={handleLanguageChange}
-      >
-        {#each LANGUAGES as lang (lang.id)}
-          <option value={lang.id}>{lang.name}</option>
-        {/each}
-      </select>
-    </div>
+    <div style="display: flex; gap: 1rem; flex: 1; overflow: hidden;">
+      <!-- Left Column: Code Editor -->
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 0.5rem; min-width: 300px;">
+            <div>
+              <label for="language-select">Lenguaje:</label>
+              <select
+                id="language-select"
+                bind:value={selectedLanguageId}
+                on:change={handleLanguageChange}
+              >
+                {#each LANGUAGES as lang (lang.id)}
+                  <option value={lang.id}>{lang.name}</option>
+                {/each}
+              </select>
+                    <label style="margin-left: 1rem;">
+                      <input
+                        type="checkbox"
+                        bind:checked={groupSequentialStatements}
+                        on:change={() => parseCode()}
+                      />
+                      Agrupar instrucciones secuenciales
+                    </label>            </div>        
+        <div style="flex: 1; border: 1px solid #ddd; overflow: hidden;">
+           <CodeEditor bind:code={sourceCode} languageId={selectedLanguageId} />
+        </div>
+      </div>
 
-    <div style="margin: 1rem 0; font-size: 14px; border: 1px solid #ddd;">
-       <CodeMirror
-        bind:value={sourceCode}
-        lang={currentLangExtension}
-        theme={oneDark}
-        styles={{ "&": { maxHeight: "400px", minHeight: "200px" } }}
-      />
-    </div>
+      <!-- Right Column: Flowchart & Controls -->
+      <div style="flex: 2; display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden;">
+        <div style="display: flex; gap: 0.5rem;">
+          <button on:click={() => exportFlowchart('png')}>Guardar PNG</button>
+          <button on:click={() => exportFlowchart('jpg')}>Guardar JPG</button>
+          <button on:click={() => exportFlowchart('svg')}>Guardar SVG</button>
+          <button on:click={() => exportFlowchart('pdf')}>Guardar PDF</button>
+        </div>
 
-    <div
-      style="border:1px solid #ccc; padding:1rem; overflow:auto; background:#f9f9f9;"
-    >
-      <svg bind:this={svg}></svg>
-    </div>
-
-    <div style="margin: 1rem 0;">
-      <textarea
-        bind:value={ast_Output}
-        rows="8"
-        style="width:100%; font-family:monospace; padding:10px;"
-      ></textarea>
+        <div
+          style="flex: 1; border:1px solid #ccc; padding:1rem; overflow:auto; background:#f9f9f9;"
+        >
+          <svg bind:this={svg}></svg>
+        </div>
+      </div>
     </div>
   {/if}
 </main>
