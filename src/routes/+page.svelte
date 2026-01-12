@@ -3,6 +3,16 @@
   import { onMount } from "svelte";
   import { Parser, Language, type SyntaxNode } from "web-tree-sitter";
   import * as d3 from "d3";
+  import { toPng, toJpeg, toSvg } from 'html-to-image';
+  import { jsPDF } from "jspdf";
+  import CodeMirror from "svelte-codemirror-editor";
+  import { javascript } from "@codemirror/lang-javascript";
+  import { python } from "@codemirror/lang-python";
+  import { cpp } from "@codemirror/lang-cpp";
+  import { java } from "@codemirror/lang-java";
+  import { rust } from "@codemirror/lang-rust";
+  import { go } from "@codemirror/lang-go";
+  import { oneDark } from "@codemirror/theme-one-dark";
 
   interface FlowNode {
     id: string;
@@ -99,6 +109,7 @@ int main() {
 
   let selectedLanguageId = "c";
   let sourceCode = exampleCodes[selectedLanguageId];
+  let groupSequentialStatements = false;
 
   let flowchartNodes: FlowNode[] = [];
   let svg: SVGSVGElement;
@@ -180,8 +191,48 @@ int main() {
       return clean;
     }
 
+    function isNodeComplex(n: SyntaxNode): boolean {
+       if (
+        [
+          "program", "module", "translation_unit", "source_file",
+          "statement_block", "compound_statement", "block", "statement_list",
+          "else_clause", "class_declaration", "class_body",
+          "function_definition", "function_declaration", "method_declaration", "function_item"
+        ].includes(n.type)
+       ) return true;
+
+       if (n.type.includes("if_") || n.type.includes("elif_") || n.type === "if_expression") return true;
+       if (n.type.includes("while") || n.type.includes("for") || n.type === "loop_expression") return true;
+
+       if (n.type === "expression_statement") {
+          const child = n.namedChildren[0];
+          if (child && (
+             child.type.includes("if") || child.type.includes("loop") || 
+             child.type.includes("while") || child.type.includes("for") || 
+             child.type === "block"
+          )) return true;
+       }
+
+       return false;
+    }
+
+    function isNodeStatement(n: SyntaxNode): boolean {
+       // Re-using logic from step 5 (Statements)
+       if (!n.isNamed) return false;
+       return (
+        n.type.endsWith("statement") ||
+        n.type.endsWith("declaration") ||
+        n.type.endsWith("expression") ||
+        n.type === "call" ||
+        n.type === "macro_invocation" ||
+        n.type === "assignment_expression" ||
+        n.type === "augmented_assignment" ||
+        n.type === "inc_dec_expression"
+       );
+    }
+
     function walk(node: SyntaxNode, entryIds: string[]): string[] {
-      // 1. Blocks
+      // 1. Blocks & Functions (Unified)
       if (
         [
           "program",
@@ -195,27 +246,47 @@ int main() {
           "else_clause",
           "class_declaration",
           "class_body",
-        ].includes(node.type)
-      ) {
-        let currentEntryIds = entryIds;
-        for (const child of node.namedChildren) {
-          currentEntryIds = walk(child, currentEntryIds);
-        }
-        return currentEntryIds;
-      }
-
-      // 2. Functions
-      if (
-        [
           "function_definition",
           "function_declaration",
           "method_declaration",
           "function_item",
         ].includes(node.type)
       ) {
-        const body = node.childForFieldName("body");
-        if (body) return walk(body, entryIds);
-        return entryIds;
+        let currentEntryIds = entryIds;
+        
+        if (groupSequentialStatements) {
+             let buffer: string[] = [];
+             
+             for (const child of node.namedChildren) {
+                 const isComplex = isNodeComplex(child);
+                 const isStmt = isNodeStatement(child);
+
+                 if (!isComplex && isStmt) {
+                     buffer.push(cleanText(child.text));
+                 } else {
+                     if (buffer.length > 0) {
+                         const processId = getNewId("process");
+                         addNode(processId, buffer.join("\n"), "process");
+                         connectNodes(currentEntryIds, processId);
+                         currentEntryIds = [processId];
+                         buffer = [];
+                     }
+                     currentEntryIds = walk(child, currentEntryIds);
+                 }
+             }
+             if (buffer.length > 0) {
+                 const processId = getNewId("process");
+                 addNode(processId, buffer.join("\n"), "process");
+                 connectNodes(currentEntryIds, processId);
+                 currentEntryIds = [processId];
+             }
+             return currentEntryIds;
+        } else {
+            for (const child of node.namedChildren) {
+              currentEntryIds = walk(child, currentEntryIds);
+            }
+            return currentEntryIds;
+        }
       }
 
       if (node.type === "expression_statement") {
@@ -226,7 +297,8 @@ int main() {
             child.type.includes("loop") ||
             child.type.includes("while") ||
             child.type.includes("for") ||
-            child.type === "block"
+            child.type === "block" ||
+            child.type === "compound_statement"
           ) {
             return walk(child, entryIds);
           }
@@ -238,8 +310,11 @@ int main() {
         ["if_statement", "elif_clause", "if_expression"].includes(node.type)
       ) {
         const condition = node.childForFieldName("condition");
-        const consequence = node.childForFieldName("consequence");
-        const alternative = node.childForFieldName("alternative");
+        // Fallback for consequence/alternative if fields are missing
+        let consequence = node.childForFieldName("consequence");
+        if (!consequence) consequence = node.namedChildren.find(c => c.type.includes("block") || c.type.includes("statement"));
+        
+        let alternative = node.childForFieldName("alternative");
 
         const decisionId = getNewId("decision");
         addNode(decisionId, cleanText(condition?.text ?? "?"), "decision");
@@ -247,30 +322,33 @@ int main() {
 
         let exitPaths: string[] = [];
         if (consequence) exitPaths.push(...walk(consequence, [decisionId]));
+        else exitPaths.push(decisionId);
+
         if (alternative) {
           exitPaths.push(...walk(alternative, [decisionId]));
         } else {
           exitPaths.push(decisionId);
         }
-        return exitPaths;
+        return Array.from(new Set(exitPaths));
       }
 
       // 4. Loops (While/For)
       const isLoop =
         node.type.includes("while") ||
         node.type.includes("for") ||
-        node.type === "loop_expression";
+        node.type === "loop_expression" ||
+        node.type === "for_statement";
+        
       if (isLoop) {
         let currentEntryIds = entryIds;
 
-        // FIX GO: Go agrupa init/cond/update dentro de un nodo hijo 'for_clause'
         const forClause = node.namedChildren.find(
-          (c) => c.type === "for_clause",
+          (c) => c.type === "for_clause" || c.type === "for_range_clause"
         );
 
-        let initializer = node.childForFieldName("initializer");
+        let initializer = node.childForFieldName("initializer") || node.childForFieldName("init"); // Added 'init' for Go
         if (forClause && !initializer)
-          initializer = forClause.childForFieldName("initializer");
+          initializer = forClause.childForFieldName("initializer") || forClause.childForFieldName("init");
 
         if (initializer) {
           const initId = getNewId("process");
@@ -288,25 +366,35 @@ int main() {
 
         if (condition) condText = cleanText(condition.text);
         else if (right) condText = "in " + cleanText(right.text);
-        else if (node.type === "loop_expression") condText = "true"; // Rust loop infinito
+        else if (node.type === "loop_expression") condText = "true";
+        else if (node.type === "for_statement" && !condition) {
+           // Go infinite loop or range loop where condition is implicit or different
+           // Check for range clause if not found in forClause logic above
+           if (node.namedChildren.some(c => c.type === "for_range_clause")) {
+               condText = "Range Loop"; 
+           } else {
+               condText = "true"; // potential infinite loop `for { }`
+           }
+        }
 
         const decisionId = getNewId("decision");
         addNode(decisionId, condText, "decision");
         connectNodes(currentEntryIds, decisionId);
 
-        // C. Body
-        const body =
+        // Body discovery fallback
+        let body =
           node.childForFieldName("body") ||
           node.childForFieldName("consequence");
+        
+        if (!body) body = node.namedChildren.find(c => c.type.includes("block") || c.type.includes("statement") || c.type === "compound_statement");
 
         let bodyExitIds: string[] = [];
         if (body) bodyExitIds = walk(body, [decisionId]);
         else bodyExitIds = [decisionId];
 
-        // D. Update
-        let update = node.childForFieldName("update");
+        let update = node.childForFieldName("update") || node.childForFieldName("post"); // Added 'post' for Go
         if (forClause && !update)
-          update = forClause.childForFieldName("update");
+          update = forClause.childForFieldName("update") || forClause.childForFieldName("post");
 
         if (update) {
           const updateId = getNewId("process");
@@ -327,10 +415,13 @@ int main() {
         node.type.endsWith("declaration") ||
         node.type.endsWith("expression") ||
         node.type === "call" ||
+        node.type === "call_expression" ||
         node.type === "macro_invocation" ||
         node.type === "assignment_expression" ||
         node.type === "augmented_assignment" ||
-        node.type === "inc_dec_expression";
+        node.type === "inc_dec_expression" ||
+        node.type === "return_statement" ||
+        node.type === "short_var_declaration";
 
       if (isStatement) {
         const processId = getNewId("process");
@@ -375,8 +466,21 @@ int main() {
     });
 
     const node_width = 140;
-    const node_height = 50;
-    const vertical_spacing = 90;
+    // Calculate node height based on text lines
+    function getNodeHeight(text: string) {
+       const lines = text.split('\n').length;
+       return Math.max(50, lines * 18 + 20);
+    }
+
+    // Since we used fixed node_height before for layout, we might need a fixed grid or dynamic y.
+    // For simplicity, let's keep a "slot height" but draw nodes larger if needed.
+    // Or we just increase default slot size.
+    // Let's make vertical_spacing depend on max node height in layer?
+    // For now, let's use a dynamic height per node for drawing, but layout assumes a bit more space.
+    
+    // Actually, simple grid layout might overlap if nodes are too tall.
+    // Let's just increase default height slightly and handle text rendering.
+    const vertical_spacing = 100; // Increased from 90
     const horizontal_spacing = 60;
 
     // 1. Calcular Profundidad
@@ -489,17 +593,18 @@ int main() {
     const globalMaxX = Math.max(...nodes.map((n) => n.x! + node_width));
 
     function getLinkPath(d: any) {
+      const srcH = getNodeHeight(d.source.text);
+      const tgtH = getNodeHeight(d.target.text);
+
       const sx = d.source.x + node_width / 2;
-      const sy = d.source.y + node_height;
+      const sy = d.source.y + srcH; // Source bottom
       const tx = d.target.x + node_width / 2;
-      const ty = d.target.y;
+      const ty = d.target.y; // Target top
 
       const isBackEdge = ty < sy;
 
       if (isBackEdge) {
         // Calculate a local max X considering only nodes within the vertical span of the loop
-        // We look for nodes that are vertically between 'ty' (target top) and 'sy' (source bottom)
-        // We add some padding to avoid collision
         const nodesInSpan = nodes.filter(n => {
            const ny = n.y ?? 0;
            return ny >= d.target.y && ny <= d.source.y;
@@ -515,8 +620,8 @@ int main() {
         return `M ${sx} ${sy} 
                 L ${sx} ${turnY}
                 L ${loopX} ${turnY} 
-                L ${loopX} ${d.target.y + node_height / 2} 
-                L ${d.target.x + node_width} ${d.target.y + node_height / 2}`;
+                L ${loopX} ${d.target.y + tgtH / 2} 
+                L ${d.target.x + node_width} ${d.target.y + tgtH / 2}`;
       } else {
         return `M ${sx} ${sy} C ${sx} ${sy + 40}, ${tx} ${ty - 40}, ${tx} ${ty}`;
       }
@@ -562,7 +667,7 @@ int main() {
     nodeGroup.each(function (d: FlowNode) {
       const g = d3.select(this);
       const w = node_width;
-      const h = node_height;
+      const h = getNodeHeight(d.text);
 
       if (d.type === "start" || d.type === "end") {
         g.append("rect")
@@ -592,14 +697,24 @@ int main() {
           .attr("stroke-width", 2);
       }
 
-      g.append("text")
+      const textEl = g.append("text")
         .attr("x", w / 2)
-        .attr("y", h / 2 + 4)
+        .attr("y", 0) // Will position tspans
         .attr("text-anchor", "middle")
         .style("font-size", "12px")
         .style("font-family", "sans-serif")
-        .style("pointer-events", "none")
-        .text(d.text);
+        .style("pointer-events", "none");
+        
+      const lines = d.text.split('\n');
+      const lineHeight = 14;
+      const startY = (h - (lines.length * lineHeight)) / 2 + 10;
+      
+      lines.forEach((line, i) => {
+          textEl.append("tspan")
+             .attr("x", w / 2)
+             .attr("y", startY + i * lineHeight)
+             .text(line);
+      });
     });
   }
 
@@ -608,7 +723,68 @@ int main() {
     parseCode();
   }
 
+  function getLangExtension(langId: string) {
+    switch (langId) {
+      case "javascript": return javascript();
+      case "python": return python();
+      case "c": return cpp();
+      case "cpp": return cpp();
+      case "java": return java();
+      case "rust": return rust();
+      case "go": return go();
+      default: return null;
+    }
+  }
+
+  $: currentLangExtension = getLangExtension(selectedLanguageId);
+
+  async function exportFlowchart(format: 'png' | 'jpg' | 'svg' | 'pdf') {
+    if (!svg) return;
+
+    try {
+      const filter = (node: HTMLElement) => {
+        return node.tagName !== 'i'; // Ejemplo de filtro si fuera necesario
+      };
+
+      const options = { backgroundColor: '#ffffff', filter };
+
+      if (format === 'png') {
+        const dataUrl = await toPng(svg, options);
+        download(dataUrl, 'flowchart.png');
+      } else if (format === 'jpg') {
+        const dataUrl = await toJpeg(svg, { ...options, quality: 0.95 });
+        download(dataUrl, 'flowchart.jpg');
+      } else if (format === 'svg') {
+        const dataUrl = await toSvg(svg, options);
+        download(dataUrl, 'flowchart.svg');
+      } else if (format === 'pdf') {
+        const dataUrl = await toPng(svg, options);
+        const pdf = new jsPDF({
+          orientation: svg.clientWidth > svg.clientHeight ? 'l' : 'p',
+          unit: 'px',
+          format: [svg.clientWidth, svg.clientHeight]
+        });
+        pdf.addImage(dataUrl, 'PNG', 0, 0, svg.clientWidth, svg.clientHeight);
+        pdf.save('flowchart.pdf');
+      }
+    } catch (error) {
+      console.error('Error exporting flowchart:', error);
+    }
+  }
+
+  function download(dataUrl: string, filename: string) {
+    const link = document.createElement('a');
+    link.download = filename;
+    link.href = dataUrl;
+    link.click();
+  }
+
   $: if (!isLoading && sourceCode) {
+    parseCode();
+  }
+  
+  // Watch for toggle changes
+  $: if (groupSequentialStatements !== undefined) {
     parseCode();
   }
 
@@ -638,12 +814,13 @@ int main() {
       </select>
     </div>
 
-    <div style="margin: 1rem 0;">
-      <textarea
+    <div style="margin: 1rem 0; font-size: 14px; border: 1px solid #ddd;">
+       <CodeMirror
         bind:value={sourceCode}
-        rows="8"
-        style="width:100%; font-family:monospace; padding:10px;"
-      ></textarea>
+        lang={currentLangExtension}
+        theme={oneDark}
+        styles={{ "&": { maxHeight: "400px", minHeight: "200px" } }}
+      />
     </div>
 
     <div
