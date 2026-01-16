@@ -1,0 +1,16 @@
+{
+  "name": "Code2Flowchart",
+  "short_name": "Code2Flow",
+  "description": "Convierte tu código en diagramas de flujo al instante.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#f97316",
+  "icons": [
+    {
+      "src": "/assets/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
