@@ -71,9 +71,6 @@
       <a href="#features" class="hover:text-orange-500 transition-colors"
         >Características</a
       >
-      <a href="#about" class="hover:text-orange-500 transition-colors"
-        >¿Por qué usarlo?</a
-      >
       <a
         href="/tool"
         class="bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 px-5 py-2.5 rounded-full hover:scale-105 transition-all"
