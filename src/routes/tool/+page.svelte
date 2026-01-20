@@ -69,6 +69,30 @@
   let flowchartNodes: FlowNode[] = [];
   let debugInfo: string[] = [];
 
+  // Resizable Sidebar Logic
+  let sidebarWidth = 450;
+  let isDragging = false;
+
+  function startDrag() {
+    isDragging = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none"; // Prevent text selection while dragging
+  }
+
+  function stopDrag() {
+    isDragging = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }
+
+  function onDrag(e: MouseEvent) {
+    if (!isDragging) return;
+    // Constraints: Min 300px, Max 800px (or window width - 300px)
+    const minWidth = 300;
+    const maxWidth = Math.min(window.innerWidth - 300, 800);
+    sidebarWidth = Math.max(minWidth, Math.min(e.clientX, maxWidth));
+  }
+
   onMount(async () => {
     try {
       await Parser.init({
@@ -484,6 +508,8 @@
   <title>Editor - Code2Flowchart</title>
 </svelte:head>
 
+<svelte:window on:mousemove={onDrag} on:mouseup={stopDrag} />
+
 <div
   class="flex flex-col h-screen bg-neutral-50 dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 overflow-hidden"
 >
@@ -543,7 +569,8 @@
     {:else}
       <!-- Sidebar / Left Panel -->
       <div
-        class="w-[450px] border-r border-neutral-200 dark:border-neutral-700 flex flex-col bg-white dark:bg-neutral-800/50"
+        class="border-r border-neutral-200 dark:border-neutral-700 flex flex-col bg-white dark:bg-neutral-800/50"
+        style="width: {sidebarWidth}px; min-width: 300px;"
       >
         <!-- Controls Area -->
         <div
@@ -637,6 +664,17 @@
         <div class="flex-1 overflow-hidden">
           <CodeEditor bind:code={sourceCode} languageId={selectedLanguageId} />
         </div>
+      </div>
+
+      <!-- Resizer Slider -->
+      <div
+        role="separator"
+        tabindex="0"
+        aria-label="Resize Sidebar"
+        class="w-1.5 bg-neutral-200 dark:bg-neutral-800 hover:bg-orange-500 dark:hover:bg-orange-500 cursor-col-resize flex items-center justify-center transition-colors group z-20"
+        on:mousedown={startDrag}
+      >
+        <div class="h-8 w-1 bg-neutral-300 dark:bg-neutral-600 group-hover:bg-white rounded-full transition-colors"></div>
       </div>
 
       <!-- Right Panel: Flowchart -->
