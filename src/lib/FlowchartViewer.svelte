@@ -30,6 +30,8 @@
   let panMode = true;
 
   let nodePositions = new Map<string, { x: number; y: number }>();
+  let linkPoints = new Map<string, { x: number; y: number }[]>();
+  let linkSmooth = new Map<string, boolean>();
   let isFirstRender = true;
 
   const THEMES: Record<string, FlowTheme> = {
@@ -70,6 +72,15 @@
       line: "#000000",
     },
   };
+
+  const node_width = 160;
+  const vertical_spacing = 100;
+  const horizontal_spacing = 80;
+
+  function getNodeHeight(text: string) {
+    const lines = (text || "").split("\n").length;
+    return Math.max(60, lines * 20 + 24);
+  }
 
   function handlePanStart(e: MouseEvent) {
     if (!panMode) return;
@@ -115,15 +126,6 @@
 
     const nodes = JSON.parse(JSON.stringify(flowchartNodes)) as FlowNode[];
     const nodeMap = new Map<string, FlowNode>(nodes.map((n) => [n.id, n]));
-
-    const node_width = 160;
-    const vertical_spacing = 100;
-    const horizontal_spacing = 80;
-
-    function getNodeHeight(text: string) {
-      const lines = text.split("\n").length;
-      return Math.max(60, lines * 20 + 24);
-    }
 
     const depths = new Map<string, number>();
     const parentsMap = new Map<string, string[]>();
@@ -175,9 +177,22 @@
       currentSvgWidth = Math.max(currentSvgWidth, totalW);
     }
 
+    // Determine the actual required size considering stored positions
+    let maxX = currentSvgWidth + 100;
+    let maxY = (maxDepth + 1) * vertical_spacing + 150;
+
+    nodePositions.forEach((pos, id) => {
+      const n = nodeMap.get(id);
+      if (n) {
+        const h = getNodeHeight(n.text);
+        if (pos.x + node_width + 100 > maxX) maxX = pos.x + node_width + 100;
+        if (pos.y + h + 100 > maxY) maxY = pos.y + h + 100;
+      }
+    });
+
     const containerWidth = container?.clientWidth || 1000;
-    const finalWidth = Math.max(containerWidth, currentSvgWidth + 100);
-    const finalHeight = (maxDepth + 1) * vertical_spacing + 150;
+    const finalWidth = Math.max(containerWidth, maxX);
+    const finalHeight = maxY;
 
     // Calculate initial positions only if not stored
     for (let d = 0; d <= maxDepth; d++) {
@@ -227,7 +242,7 @@
       .append("marker")
       .attr("id", "arrowhead")
       .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 9)
+      .attr("refX", 10) // La punta del triángulo es el punto de anclaje
       .attr("refY", 0)
       .attr("orient", "auto")
       .attr("markerWidth", 8)
@@ -245,6 +260,9 @@
     });
 
     const getLinkPath = (d: any) => {
+      const linkId = `${d.source.id}-${d.target.id}`;
+      const points = linkPoints.get(linkId) || [];
+      const isSmooth = linkSmooth.get(linkId) || false;
       const srcH = getNodeHeight(d.source.text);
       const tgtH = getNodeHeight(d.target.text);
       const sx = d.source.x + node_width / 2;
@@ -252,11 +270,35 @@
       const tx = d.target.x + node_width / 2;
       const ty = d.target.y;
 
+      // El path llegará hasta el borde del nodo (ty), 
+      // pero usaremos un truco visual o el marker se encargará.
+      // Para que la línea no se vea en la punta, acortamos el path 
+      // pero mantenemos el destino para el marker.
+
+      if (points.length > 0) {
+        const allPoints = [{ x: sx, y: sy }, ...points, { x: tx, y: ty }];
+        if (isSmooth) {
+          const lineGenerator = d3
+            .line()
+            .x((p: any) => p.x)
+            .y((p: any) => p.y)
+            .curve(d3.curveCatmullRom.alpha(0.5));
+          return lineGenerator(allPoints as any);
+        } else {
+          let path = `M ${sx} ${sy}`;
+          points.forEach((p) => (path += ` L ${p.x} ${p.y}`));
+          path += ` L ${tx} ${ty}`;
+          return path;
+        }
+      }
+
       if (ty < sy) {
         const loopOffset = 50;
         const turnY = sy + 25;
         const midX = Math.max(d.source.x, d.target.x) + node_width + loopOffset;
-        return `M ${sx} ${sy} L ${sx} ${turnY} L ${midX} ${turnY} L ${midX} ${d.target.y + tgtH / 2} L ${d.target.x + node_width} ${d.target.y + tgtH / 2}`;
+        const targetSideX = d.target.x + node_width;
+        const targetMidY = d.target.y + tgtH / 2;
+        return `M ${sx} ${sy} L ${sx} ${turnY} L ${midX} ${turnY} L ${midX} ${targetMidY} L ${targetSideX} ${targetMidY}`;
       }
 
       const midY = (sy + ty) / 2;
@@ -277,8 +319,60 @@
       .attr("d", getLinkPath)
       .attr("fill", "none")
       .attr("stroke", "transparent")
-      .attr("stroke-width", 20)
-      .style("cursor", "pointer");
+      .attr("stroke-width", 30)
+      .style("cursor", "pointer")
+      .on("contextmenu", function (event, d: any) {
+        if (panMode) return;
+        event.preventDefault();
+        const linkId = `${d.source.id}-${d.target.id}`;
+        linkSmooth.set(linkId, !linkSmooth.get(linkId));
+        updateFlowchart();
+      })
+      .on("click", function (event, d: any) {
+        if (panMode) return;
+        event.stopPropagation();
+        const [mx, my] = d3.pointer(event, svgElement.node());
+        const linkId = `${d.source.id}-${d.target.id}`;
+
+        if (!linkPoints.has(linkId)) {
+          linkPoints.set(linkId, []);
+        }
+        const points = linkPoints.get(linkId)!;
+
+        const srcH = getNodeHeight(d.source.text);
+        const sx = d.source.x + node_width / 2;
+        const sy = d.source.y + srcH;
+        const tx = d.target.x + node_width / 2;
+        const ty = d.target.y;
+
+        const allPoints = [{ x: sx, y: sy }, ...points, { x: tx, y: ty }];
+        let minDist = Infinity;
+        let insertIdx = 0;
+
+        for (let i = 0; i < allPoints.length - 1; i++) {
+          const p1 = allPoints[i];
+          const p2 = allPoints[i + 1];
+          const l2 =
+            (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y);
+          if (l2 === 0) continue;
+          let t =
+            ((mx - p1.x) * (p2.x - p1.x) + (my - p1.y) * (p2.y - p1.y)) / l2;
+          t = Math.max(0, Math.min(1, t));
+          const projX = p1.x + t * (p2.x - p1.x);
+          const projY = p1.y + t * (p2.y - p1.y);
+          const dist = Math.sqrt(
+            (mx - projX) * (mx - projX) + (my - projY) * (my - projY),
+          );
+
+          if (dist < minDist) {
+            minDist = dist;
+            insertIdx = i;
+          }
+        }
+
+        points.splice(insertIdx, 0, { x: mx, y: my });
+        updateFlowchart();
+      });
 
     linkPaths
       .append("path")
@@ -314,6 +408,61 @@
 
     function updateLinks() {
       linkGroup.selectAll("path").attr("d", getLinkPath);
+      svgElement.selectAll(".link-point-group").attr("transform", (d: any) => 
+        `translate(${d.point.x}, ${d.point.y})`
+      );
+    }
+
+    const dragPoint = d3
+      .drag()
+      .on("start", function (event) {
+        if (panMode) return;
+        event.sourceEvent.stopPropagation();
+        d3.select(this).select(".link-point").classed("dragging", true);
+      })
+      .on("drag", function (event, d: any) {
+        if (panMode) return;
+        d.point.x = event.x;
+        d.point.y = event.y;
+        updateLinks();
+      })
+      .on("end", function () {
+        if (panMode) return;
+        d3.select(this).select(".link-point").classed("dragging", false);
+      });
+
+    if (!panMode) {
+      links.forEach((link) => {
+        const linkId = `${link.source.id}-${link.target.id}`;
+        const points = linkPoints.get(linkId) || [];
+        points.forEach((point, index) => {
+          const pointGroup = svgElement
+            .append("g")
+            .datum({ point, linkId, index })
+            .attr("class", "link-point-group")
+            .attr("transform", `translate(${point.x}, ${point.y})`)
+            .style("cursor", "move")
+            .call(dragPoint as any)
+            .on("contextmenu", function (event) {
+              event.preventDefault();
+              points.splice(index, 1);
+              updateFlowchart();
+            });
+
+          // Invisible hit area (larger tolerance)
+          pointGroup.append("circle")
+            .attr("r", 15)
+            .attr("fill", "transparent");
+
+          // Visible point
+          pointGroup.append("circle")
+            .attr("class", "link-point")
+            .attr("r", 6)
+            .attr("fill", currentTheme.line)
+            .attr("stroke", "white")
+            .attr("stroke-width", 2);
+        });
+      });
     }
 
     const drag = d3
@@ -333,6 +482,13 @@
 
         d3.select(this).attr("transform", `translate(${d.x}, ${d.y})`);
         updateLinks();
+
+        // Dynamically update SVG size if dragging outside current bounds
+        const h = getNodeHeight(d.text);
+        const currentW = +svgElement.attr("width");
+        const currentH = +svgElement.attr("height");
+        if (d.x + node_width + 100 > currentW) svgElement.attr("width", d.x + node_width + 100);
+        if (d.y + h + 100 > currentH) svgElement.attr("height", d.y + h + 100);
       })
       .on("end", function (event, d: any) {
         if (panMode) return;
@@ -477,6 +633,8 @@
   $: if (flowchartNodes) {
     if (flowchartNodes.length !== prevNodesLength) {
       nodePositions.clear();
+      linkPoints.clear();
+      linkSmooth.clear();
       prevNodesLength = flowchartNodes.length;
     }
     if (svg && container) {
@@ -579,7 +737,7 @@
     bind:this={canvasContainer}
     on:mousedown={handlePanStart}
   >
-    <svg bind:this={svg} style="transition: transform 0.05s ease-out;"></svg>
+    <svg bind:this={svg} style="transition: transform 0.05s ease-out; overflow: visible;"></svg>
   </div>
 </div>
 
@@ -596,5 +754,16 @@
   }
   :global(.link-group) {
     transition: all 0.2s ease;
+  }
+  :global(.link-point) {
+    transition:
+      r 0.2s,
+      fill 0.2s;
+  }
+  :global(.link-point:hover) {
+    r: 8;
+  }
+  :global(.link-point.dragging) {
+    fill: #3b82f6;
   }
 </style>
